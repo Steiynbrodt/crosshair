@@ -1,10 +1,16 @@
 import sys
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QPainter, QPen, QColor
 from PyQt6.QtWidgets import QApplication, QWidget
 
+from pynput import keyboard
+
 
 class CrosshairOverlay(QWidget):
+    # thread-safe signal from pynput thread -> Qt UI thread
+    nudge = pyqtSignal(int, int)
+    quit_signal = pyqtSignal()
+
     def __init__(self):
         super().__init__()
 
@@ -16,7 +22,7 @@ class CrosshairOverlay(QWidget):
         self.color = QColor(0, 255, 0)
         self.outline_color = QColor(0, 0, 0)
 
-        # Window setup: transparent, always on top, click-through
+        # Window: transparent, topmost, no frame, tool window
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -25,13 +31,17 @@ class CrosshairOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
-        # Screen geometry
+        # Cover primary screen
         screen = QApplication.primaryScreen().geometry()
         self.setGeometry(screen)
 
-        # Crosshair position (start centered)
+        # Crosshair position
         self.cx = self.width() // 2
         self.cy = self.height() // 2
+
+        # Signals
+        self.nudge.connect(self._nudge_pos)
+        self.quit_signal.connect(self.close)
 
         # Repaint timer
         self.timer = QTimer()
@@ -40,7 +50,47 @@ class CrosshairOverlay(QWidget):
 
         self.show()
 
-    def draw_crosshair(self, p, cx, cy, size, gap, thickness, color):
+        # Start global keyboard listener in background thread
+        self.listener = keyboard.Listener(on_press=self._on_key_press)
+        self.listener.start()
+
+    def closeEvent(self, event):
+        # Stop listener when closing
+        try:
+            if hasattr(self, "listener") and self.listener is not None:
+                self.listener.stop()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+    def _on_key_press(self, key):
+        # Global keys (works even when game is focused)
+        step = 3  # pixels per press
+
+        if key == keyboard.Key.esc:
+            self.quit_signal.emit()
+            return False  # stops listener
+
+        if key == keyboard.Key.left:
+            self.nudge.emit(-step, 0)
+        elif key == keyboard.Key.right:
+            self.nudge.emit(step, 0)
+        elif key == keyboard.Key.up:
+            self.nudge.emit(0, -step)
+        elif key == keyboard.Key.down:
+            self.nudge.emit(0, step)
+
+    def _nudge_pos(self, dx, dy):
+        self.cx += dx
+        self.cy += dy
+
+        # Keep inside screen
+        self.cx = max(0, min(self.width(), self.cx))
+        self.cy = max(0, min(self.height(), self.cy))
+
+        self.update()
+
+    def _draw_crosshair(self, p, cx, cy, size, gap, thickness, color):
         pen = QPen(color)
         pen.setWidth(thickness)
         p.setPen(pen)
@@ -54,47 +104,19 @@ class CrosshairOverlay(QWidget):
         p = QPainter(self)
 
         if self.outline:
-            self.draw_crosshair(
-                p,
-                self.cx,
-                self.cy,
-                self.size,
-                self.gap,
+            self._draw_crosshair(
+                p, self.cx, self.cy,
+                self.size, self.gap,
                 self.thickness + 2 * self.outline,
-                self.outline_color,
+                self.outline_color
             )
 
-        self.draw_crosshair(
-            p,
-            self.cx,
-            self.cy,
-            self.size,
-            self.gap,
+        self._draw_crosshair(
+            p, self.cx, self.cy,
+            self.size, self.gap,
             self.thickness,
-            self.color,
+            self.color
         )
-
-    def keyPressEvent(self, e):
-        step = 2  # pixels per press
-
-        if e.key() == Qt.Key.Key_Escape:
-            self.close()
-            return
-
-        if e.key() == Qt.Key.Key_Left:
-            self.cx -= step
-        elif e.key() == Qt.Key.Key_Right:
-            self.cx += step
-        elif e.key() == Qt.Key.Key_Up:
-            self.cy -= step
-        elif e.key() == Qt.Key.Key_Down:
-            self.cy += step
-
-        # keep inside screen
-        self.cx = max(0, min(self.width(), self.cx))
-        self.cy = max(0, min(self.height(), self.cy))
-
-        self.update()
 
 
 if __name__ == "__main__":
